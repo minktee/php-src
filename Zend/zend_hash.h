@@ -49,8 +49,6 @@ typedef void (*dtor_func_t)(void *pDest);
 typedef void (*copy_ctor_func_t)(void *pElement);
 typedef void (*copy_ctor_param_func_t)(void *pElement, void *pParam);
 
-struct _hashtable;
-
 typedef struct bucket {
 	ulong h;						/* Used for numeric indexing */
 	uint nKeyLength;
@@ -63,15 +61,21 @@ typedef struct bucket {
 	const char *arKey;
 } Bucket;
 
+typedef struct _zend_hash_position_tracker {
+	Bucket **pos;
+	struct _zend_hash_position_tracker *next;
+} zend_hash_position_tracker;
+
 typedef struct _hashtable {
 	uint nTableSize;
 	uint nTableMask;
 	uint nNumOfElements;
 	ulong nNextFreeElement;
-	Bucket *pInternalPointer;	/* Used for element traversal */
+	Bucket *pInternalPointer;
 	Bucket *pListHead;
 	Bucket *pListTail;
 	Bucket **arBuckets;
+	struct _zend_hash_position_tracker *posTracker;
 	dtor_func_t pDestructor;
 	zend_bool persistent;
 	unsigned char nApplyCount;
@@ -80,7 +84,6 @@ typedef struct _hashtable {
 	int inconsistent;
 #endif
 } HashTable;
-
 
 typedef struct _zend_hash_key {
 	const char *arKey;
@@ -175,21 +178,16 @@ ZEND_API ulong zend_hash_next_free_element(const HashTable *ht);
 	(zend_hash_get_current_key_type_ex(ht, pos) == HASH_KEY_NON_EXISTANT ? FAILURE : SUCCESS)
 ZEND_API int zend_hash_move_forward_ex(HashTable *ht, HashPosition *pos);
 ZEND_API int zend_hash_move_backwards_ex(HashTable *ht, HashPosition *pos);
-ZEND_API int zend_hash_get_current_key_ex(const HashTable *ht, char **str_index, uint *str_length, ulong *num_index, zend_bool duplicate, HashPosition *pos);
-ZEND_API void zend_hash_get_current_key_zval_ex(const HashTable *ht, zval *key, HashPosition *pos);
+ZEND_API int zend_hash_get_current_key_ex(HashTable *ht, char **str_index, uint *str_length, ulong *num_index, zend_bool duplicate, HashPosition *pos);
+ZEND_API void zend_hash_get_current_key_zval_ex(HashTable *ht, zval *key, HashPosition *pos);
 ZEND_API int zend_hash_get_current_key_type_ex(HashTable *ht, HashPosition *pos);
 ZEND_API int zend_hash_get_current_data_ex(HashTable *ht, void **pData, HashPosition *pos);
 ZEND_API void zend_hash_internal_pointer_reset_ex(HashTable *ht, HashPosition *pos);
 ZEND_API void zend_hash_internal_pointer_end_ex(HashTable *ht, HashPosition *pos);
 ZEND_API int zend_hash_update_current_key_ex(HashTable *ht, int key_type, const char *str_index, uint str_length, ulong num_index, int mode, HashPosition *pos);
 
-typedef struct _HashPointer {
-	HashPosition pos;
-	ulong h;
-} HashPointer;
-
-ZEND_API int zend_hash_get_pointer(const HashTable *ht, HashPointer *ptr);
-ZEND_API int zend_hash_set_pointer(HashTable *ht, const HashPointer *ptr);
+ZEND_API void zend_track_hash_position(HashTable *ht, HashPosition *pos);
+ZEND_API void zend_untrack_hash_position(HashTable *ht, HashPosition *pos);
 
 #define zend_hash_has_more_elements(ht) \
 	zend_hash_has_more_elements_ex(ht, NULL)

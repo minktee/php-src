@@ -3314,7 +3314,6 @@ ZEND_VM_HANDLER(51, ZEND_CONT, ANY, CONST)
 
 ZEND_VM_HANDLER(100, ZEND_GOTO, ANY, CONST)
 {
-	zend_op *brk_opline;
 	USE_OPLINE
 	zend_brk_cont_element *el;
 
@@ -3322,20 +3321,8 @@ ZEND_VM_HANDLER(100, ZEND_GOTO, ANY, CONST)
 	el = zend_brk_cont(Z_LVAL_P(opline->op2.zv), opline->extended_value,
  	                   EX(op_array), execute_data TSRMLS_CC);
 
-	brk_opline = EX(op_array)->opcodes + el->brk;
+	i_handle_free_op(EX(op_array)->opcodes + el->brk, execute_data TSRMLS_CC);
 
-	switch (brk_opline->opcode) {
-		case ZEND_SWITCH_FREE:
-			if (!(brk_opline->extended_value & EXT_TYPE_FREE_ON_RETURN)) {
-				zval_ptr_dtor(&EX_T(brk_opline->op1.var).var.ptr);
-			}
-			break;
-		case ZEND_FREE:
-			if (!(brk_opline->extended_value & EXT_TYPE_FREE_ON_RETURN)) {
-				zendi_zval_dtor(EX_T(brk_opline->op1.var).tmp_var);
-			}
-			break;
-	}
 	ZEND_VM_JMP(opline->op1.jmp_addr);
 }
 
@@ -4101,7 +4088,7 @@ ZEND_VM_HANDLER(77, ZEND_FE_RESET, CONST|TMP|VAR|CV, ANY)
 	SAVE_OPLINE();
 
 	if ((OP1_TYPE == IS_CV || OP1_TYPE == IS_VAR) &&
-	    (opline->extended_value & ZEND_FE_RESET_VARIABLE)) {
+	    (opline->extended_value & ZEND_FE_FETCH_BYREF)) {
 		array_ptr_ptr = GET_OP1_ZVAL_PTR_PTR(BP_VAR_R);
 		if (array_ptr_ptr == NULL || array_ptr_ptr == &EG(uninitialized_zval_ptr)) {
 			MAKE_STD_ZVAL(array_ptr);
@@ -4114,23 +4101,22 @@ ZEND_VM_HANDLER(77, ZEND_FE_RESET, CONST|TMP|VAR|CV, ANY)
 
 			ce = Z_OBJCE_PP(array_ptr_ptr);
 			if (!ce || ce->get_iterator == NULL) {
-				SEPARATE_ZVAL_IF_NOT_REF(array_ptr_ptr);
 				Z_ADDREF_PP(array_ptr_ptr);
 			}
 			array_ptr = *array_ptr_ptr;
 		} else {
 			if (Z_TYPE_PP(array_ptr_ptr) == IS_ARRAY) {
-				SEPARATE_ZVAL_IF_NOT_REF(array_ptr_ptr);
-				if (opline->extended_value & ZEND_FE_FETCH_BYREF) {
-					Z_SET_ISREF_PP(array_ptr_ptr);
+				if (!Z_ISREF_PP(array_ptr_ptr)) {
+					SEPARATE_ZVAL_TO_MAKE_IS_REF(array_ptr_ptr);
 				}
 			}
+
 			array_ptr = *array_ptr_ptr;
 			Z_ADDREF_P(array_ptr);
 		}
 	} else {
 		array_ptr = GET_OP1_ZVAL_PTR(BP_VAR_R);
-		if (IS_OP1_TMP_FREE()) { /* IS_TMP_VAR */
+		if (OP1_TYPE == IS_TMP_VAR) {
 			zval *tmp;
 
 			ALLOC_ZVAL(tmp);
@@ -4147,10 +4133,7 @@ ZEND_VM_HANDLER(77, ZEND_FE_RESET, CONST|TMP|VAR|CV, ANY)
 			if (!ce || !ce->get_iterator) {
 				Z_ADDREF_P(array_ptr);
 			}
-		} else if (OP1_TYPE == IS_CONST ||
-		           ((OP1_TYPE == IS_CV || OP1_TYPE == IS_VAR) &&
-		            !Z_ISREF_P(array_ptr) &&
-		            Z_REFCOUNT_P(array_ptr) > 1)) {
+		} else if (OP1_TYPE == IS_CONST) {
 			zval *tmp;
 
 			ALLOC_ZVAL(tmp);
@@ -4197,26 +4180,27 @@ ZEND_VM_HANDLER(77, ZEND_FE_RESET, CONST|TMP|VAR|CV, ANY)
 		}
 		iter->index = -1; /* will be set to 0 before using next handler */
 	} else if ((fe_ht = HASH_OF(array_ptr)) != NULL) {
-		zend_hash_internal_pointer_reset(fe_ht);
+		HashPosition *pos = &EX_T(opline->result.var).fe.fe_pos;
+		zend_track_hash_position(fe_ht, pos);
+		zend_hash_internal_pointer_reset_ex(fe_ht, pos);
 		if (ce) {
 			zend_object *zobj = zend_objects_get_address(array_ptr TSRMLS_CC);
-			while (zend_hash_has_more_elements(fe_ht) == SUCCESS) {
+			while (zend_hash_has_more_elements_ex(fe_ht, pos) == SUCCESS) {
 				char *str_key;
 				uint str_key_len;
 				ulong int_key;
 				zend_uchar key_type;
 
-				key_type = zend_hash_get_current_key_ex(fe_ht, &str_key, &str_key_len, &int_key, 0, NULL);
+				key_type = zend_hash_get_current_key_ex(fe_ht, &str_key, &str_key_len, &int_key, 0, pos);
 				if (key_type != HASH_KEY_NON_EXISTANT &&
 					(key_type == HASH_KEY_IS_LONG ||
 				     zend_check_property_access(zobj, str_key, str_key_len-1 TSRMLS_CC) == SUCCESS)) {
 					break;
 				}
-				zend_hash_move_forward(fe_ht);
+				zend_hash_move_forward_ex(fe_ht, pos);
 			}
 		}
-		is_empty = zend_hash_has_more_elements(fe_ht) != SUCCESS;
-		zend_hash_get_pointer(fe_ht, &EX_T(opline->result.var).fe.fe_pos);
+		is_empty = zend_hash_has_more_elements_ex(fe_ht, pos) != SUCCESS;
 	} else {
 		zend_error(E_WARNING, "Invalid argument supplied for foreach()");
 		is_empty = 1;
@@ -4238,6 +4222,7 @@ ZEND_VM_HANDLER(78, ZEND_FE_FETCH, VAR, ANY)
 	zval *array = EX_T(opline->op1.var).fe.ptr;
 	zval **value;
 	HashTable *fe_ht;
+	HashPosition *pos;
 	zend_object_iterator *iter = NULL;
 
 	zval *key = NULL;
@@ -4261,15 +4246,15 @@ ZEND_VM_HANDLER(78, ZEND_FE_FETCH, VAR, ANY)
 			zend_ulong int_key;
 
 			fe_ht = Z_OBJPROP_P(array);
-			zend_hash_set_pointer(fe_ht, &EX_T(opline->op1.var).fe.fe_pos);
+			pos = &EX_T(opline->op1.var).fe.fe_pos;
 			do {
-				if (zend_hash_get_current_data(fe_ht, (void **) &value)==FAILURE) {
+				if (zend_hash_get_current_data_ex(fe_ht, (void **) &value, pos)==FAILURE) {
 					/* reached end of iteration */
 					ZEND_VM_JMP(EX(op_array)->opcodes+opline->op2.opline_num);
 				}
-				key_type = zend_hash_get_current_key_ex(fe_ht, &str_key, &str_key_len, &int_key, 0, NULL);
+				key_type = zend_hash_get_current_key_ex(fe_ht, &str_key, &str_key_len, &int_key, 0, pos);
 
-				zend_hash_move_forward(fe_ht);
+				zend_hash_move_forward_ex(fe_ht, pos);
 			} while (key_type != HASH_KEY_IS_LONG &&
 			         zend_check_property_access(zobj, str_key, str_key_len - 1 TSRMLS_CC) != SUCCESS);
 
@@ -4286,23 +4271,21 @@ ZEND_VM_HANDLER(78, ZEND_FE_FETCH, VAR, ANY)
 				}
 			}
 
-			zend_hash_get_pointer(fe_ht, &EX_T(opline->op1.var).fe.fe_pos);
 			break;
 		}
 
 		case ZEND_ITER_PLAIN_ARRAY:
 			fe_ht = Z_ARRVAL_P(array);
-			zend_hash_set_pointer(fe_ht, &EX_T(opline->op1.var).fe.fe_pos);
-			if (zend_hash_get_current_data(fe_ht, (void **) &value)==FAILURE) {
+			pos = &EX_T(opline->op1.var).fe.fe_pos;
+			if (zend_hash_get_current_data_ex(fe_ht, (void **) &value, pos)==FAILURE) {
 				/* reached end of iteration */
 				ZEND_VM_JMP(EX(op_array)->opcodes+opline->op2.opline_num);
 			}
 			if (key) {
-				zend_hash_get_current_key_zval(fe_ht, key);
+				zend_hash_get_current_key_zval_ex(fe_ht, key, pos);
 			}
-			zend_hash_move_forward(fe_ht);
-			zend_hash_get_pointer(fe_ht, &EX_T(opline->op1.var).fe.fe_pos);
-			break;
+			zend_hash_move_forward_ex(fe_ht, pos);
+		break;
 
 		case ZEND_ITER_OBJECT:
 			/* !iter happens from exception */
@@ -5046,29 +5029,16 @@ ZEND_VM_HANDLER(149, ZEND_HANDLE_EXCEPTION, ANY, ANY)
 		EX(call) = NULL;
 	}
 
-	for (i=0; i<EX(op_array)->last_brk_cont; i++) {
-		if (EX(op_array)->brk_cont_array[i].start < 0) {
+	for (i = 0; i < EX(op_array)->last_brk_cont; i++) {
+		zend_brk_cont_element *cur = &EX(op_array)->brk_cont_array[i];
+		if (cur->start < 0) {
 			continue;
-		} else if (EX(op_array)->brk_cont_array[i].start > op_num) {
+		} else if (cur->start > op_num) {
 			/* further blocks will not be relevant... */
 			break;
-		} else if (op_num < EX(op_array)->brk_cont_array[i].brk) {
-			if (!catch_op_num ||
-			    catch_op_num >= EX(op_array)->brk_cont_array[i].brk) {
-				zend_op *brk_opline = &EX(op_array)->opcodes[EX(op_array)->brk_cont_array[i].brk];
-
-				switch (brk_opline->opcode) {
-					case ZEND_SWITCH_FREE:
-						if (!(brk_opline->extended_value & EXT_TYPE_FREE_ON_RETURN)) {
-							zval_ptr_dtor(&EX_T(brk_opline->op1.var).var.ptr);
-						}
-						break;
-					case ZEND_FREE:
-						if (!(brk_opline->extended_value & EXT_TYPE_FREE_ON_RETURN)) {
-							zendi_zval_dtor(EX_T(brk_opline->op1.var).tmp_var);
-						}
-						break;
-				}
+		} else if (op_num < cur->brk) {
+			if (!catch_op_num || catch_op_num >= cur->brk) {
+				i_handle_free_op(&EX(op_array)->opcodes[cur->brk], execute_data TSRMLS_CC);
 			}
 		}
 	}
@@ -5427,6 +5397,29 @@ ZEND_VM_HANDLER(163, ZEND_FAST_RET, ANY, ANY)
 			ZEND_VM_DISPATCH_TO_HELPER(zend_leave_helper);
 		}
 	}
+}
+
+ZEND_VM_HANDLER(164, ZEND_FOREACH_FREE, VAR, ANY)
+{
+	USE_OPLINE
+	zval *array;
+	zend_object_iterator *iter_dummy;
+
+	SAVE_OPLINE();
+
+	array = EX_T(opline->op1.var).fe.ptr;
+	switch (zend_iterator_unwrap(array, &iter_dummy TSRMLS_CC)) {
+		case ZEND_ITER_PLAIN_OBJECT:
+		case ZEND_ITER_PLAIN_ARRAY:
+			zend_untrack_hash_position(HASH_OF(array), &EX_T(opline->op1.var).fe.fe_pos);
+		default:
+			break;
+	}
+
+	zval_ptr_dtor(&array);
+
+	CHECK_EXCEPTION();
+	ZEND_VM_NEXT_OPCODE();
 }
 
 ZEND_VM_EXPORT_HELPER(zend_do_fcall, zend_do_fcall_common_helper)
